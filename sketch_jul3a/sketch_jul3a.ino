@@ -1,11 +1,11 @@
 #include <Arduino.h>
 #include "esp_camera.h"
+#include "index_html.h"
 #include <WiFi.h>
 #include <WebServer.h>
 
-// this code make a simple web server that listens on port 80
+// make simple web server that listens on port 80
 WebServer server(80);
-
 
 // connect the pin
 #define PWDN_GPIO_NUM  32
@@ -33,31 +33,60 @@ WebServer server(80);
 const char *ssid = "realmiC21";
 const char *password = "DSC00286L";
 
+void handleDownload(){
+  camera_fb_t *fb = esp_camera_fb_get();
 
-void handleRoot(){
-  String html;
+  if(!fb){
+    server.send(500, "text/plain", "Camera Error");
+  }
 
-  html += "<html>";
-  html += "<body>";
-  html += "<h1>ESP32-CAM</h1>";
-  html += "<img src='/capture'>";
-  html += "</body>";
-  html += "</html>";
-  server.send(200, "text/html", html);
+  WiFiClient client = server.client();
+  client.println("HTTP/1.1 200 OK");
+  client.println("Content-TypeL image/jpeg");
+  client.println("Content-Disposition: attachment; filename=capture.jpg");
+  client.print("content-Length: ");
+  client.println(fb->len);
+  client.println();
+
+  client.write(fb->buf, fb->len);
+
+  esp_camera_fb_return(fb);
+}
+
+void handleStream(){
+  WiFiClient client = server.client();
+  client.println("HTTP/1.1 200 OK");
+  client.println("Content-Type: multipart/x-mixed-replace; boundary=frame");
+  client.println();
+
+  while(client.connected()){
+    camera_fb_t *fb = esp_camera_fb_get();
+
+    if(!fb){
+      break;
+    }
+
+    client.println("--frame");
+    client.println("Content-Type: image/jpeg");
+    client.print("Content-Length: ");
+    client.println(fb->len);
+    client.println();
+
+    client.write(fb->buf, fb->len);
+    client.println();
+
+    esp_camera_fb_return(fb);
+  }
 }
 
 void handleCapture(){
-  // This asks the camera to take a picture
   camera_fb_t *fb = esp_camera_fb_get();
 
-  // if the camera fail http status 500 (Internal Server error)
   if(!fb){
     server.send(500, "text/plain", "Camera Error");
     return;
   }
 
-  // This is probably the most important line.
-  // Server send the picture
   server.send_P(
     200,
     "image/jpeg",
@@ -67,19 +96,19 @@ void handleCapture(){
   esp_camera_fb_return(fb);
 }
 
+void handleRoot(){
+  server.send_P(200, "text/html", index_html);
+}
+
 void setup(){
   Serial.begin(115200);
   Serial.setDebugOutput(true);
   Serial.println();
 
-
-  // The camera needs a clock signal
-  // The ESP32 generates that clock using LEDC hardware.
   camera_config_t config;
   config.ledc_channel = LEDC_CHANNEL_0;
   config.ledc_timer = LEDC_TIMER_0;
 
-  // Pin Configuration
   config.pin_d0 = Y2_GPIO_NUM;
   config.pin_d1 = Y3_GPIO_NUM;
   config.pin_d2 = Y4_GPIO_NUM;
@@ -97,58 +126,35 @@ void setup(){
   config.pin_pwdn = PWDN_GPIO_NUM;
   config.pin_reset = RESET_GPIO_NUM;
 
-  // Camera Clock
   config.xclk_freq_hz = 20000000;
-
   // Frame Size
-  config.frame_size = FRAMESIZE_UXGA; // 1600 x 1200
+  config.frame_size = FRAMESIZE_UXGA;
   // Pixel Format
-  config.pixel_format = PIXFORMAT_JPEG;  // for streaming
+  config.pixel_format = PIXFORMAT_JPEG;
 
 
-  //config.pixel_format = PIXFORMAT_RGB565; // for face detection/recognition
-
-  // Grab Mode
-  // Only, capture a new frame when the frame buffer is empty
-  config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
-  // Frame Buffer Location (stores images in external PSRAM)
-  // PSRAM is much large than normal RAM
+  config.grab_mode = CAMERA_GRAB_LATEST;
   config.fb_location = CAMERA_FB_IN_PSRAM;
 
   // JPEG Qualtiy
-  config.jpeg_quality = 12;
-  config.fb_count = 1;
+  config.jpeg_quality = 10;
+  config.fb_count = 2;
 
-  if(config.pixel_format == PIXFORMAT_JPEG){
-    if(psramFound()){
-      config.jpeg_quality = 10;
-      config.fb_count = 2;
-      config.grab_mode = CAMERA_GRAB_LATEST;
-    }
-    else{
-      config.frame_size = FRAMESIZE_SVGA;
-      config.fb_location = CAMERA_FB_IN_DRAM;
-    }
-  }
-
-  // Intialize Camera
   esp_err_t err = esp_camera_init(&config);
   if(err != ESP_OK){
     Serial.printf("Camera init failed with error 0x%x", err);
     return;
   }
 
-  // Camera Sensor
   sensor_t *s = esp_camera_sensor_get();
   if(config.pixel_format == PIXFORMAT_JPEG){
     s->set_framesize(s, FRAMESIZE_QVGA);
   }
 
-
   WiFi.begin(ssid, password);
   WiFi.setSleep(false);
   Serial.print("WiFi connecting");
-  while (WiFi.status() != WL_CONNECTED){
+  while(WiFi.status() != WL_CONNECTED){
     delay(500);
     Serial.print(".");
   }
@@ -156,14 +162,14 @@ void setup(){
   Serial.println("WiFi connected");
 
   server.on("/", handleRoot);
-  server.on("/capture", handleCapture);
+  server.on("/stream", handleStream);
+  server.on("/download", handleDownload);
   server.begin();
 
   Serial.print("Camera Ready! Use 'http://");
   Serial.print(WiFi.localIP());
   Serial.println("' to connect");
 }
-
 
 void loop(){
   server.handleClient();
